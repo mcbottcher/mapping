@@ -88,7 +88,9 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            cursor: pointer;
         }
+        .track-item .name:hover { text-decoration: underline; }
         .track-item .remove {
             margin-left: auto;
             border: none;
@@ -414,8 +416,6 @@
             for (const r of document.querySelectorAll('input[name="baseLayer"]')) {
                 map.setLayoutProperty(r.value, 'visibility', r.checked ? 'visible' : 'none');
             }
-            // The offline download always grabs the active base layer
-            if (offlineTrackId !== null) updateOfflineEstimate();
         });
     }
 
@@ -617,7 +617,9 @@
             const label = document.createElement('span');
             label.className = 'name';
             label.textContent = track.name;
-            label.title = track.name;
+            label.title = `${track.name} — click to zoom to it`;
+            label.addEventListener('click', () =>
+                map.fitBounds(track.bbox, {padding: 80, duration: 1000}));
 
             const dlBtn = document.createElement('button');
             dlBtn.className = 'dl' + (offlineAreas[track.saveKey] ? ' saved' : '');
@@ -646,7 +648,10 @@
     // in localStorage, keyed by the track's saveKey.
     const TILE_CACHE = 'mapviewer-tiles-v1';
     const OFFLINE_MIN_ZOOM = 3;
-    const AVG_TILE_BYTES = {osm: 20000, satellite: 30000, opentopo: 60000};
+    // Every base layer plus the trails overlay is downloaded, so layer
+    // switching still works offline.
+    const OFFLINE_LAYERS = ['osm', 'satellite', 'opentopo', 'trails'];
+    const AVG_TILE_BYTES = {osm: 20000, satellite: 30000, opentopo: 60000, trails: 8000};
 
     const offlineAreas = JSON.parse(localStorage.getItem('offlineAreas') || '{}');
     let offlineTrackId = null;
@@ -663,10 +668,6 @@
 
     function saveOfflineRegistry() {
         localStorage.setItem('offlineAreas', JSON.stringify(offlineAreas));
-    }
-
-    function currentBaseLayer() {
-        return document.querySelector('input[name="baseLayer"]:checked').value;
     }
 
     // Slippy-map tile indices for a lon/lat at zoom z
@@ -714,14 +715,17 @@
         const saved = offlineAreas[track.saveKey];
         offlineStatus.hidden = !saved;
         if (saved) {
+            const what = saved.layers ? `${saved.layers.length} layers` : saved.layer;
             offlineStatus.textContent =
-                `Saved: ${saved.tiles} tiles, ${fmtMB(saved.bytes)} (${saved.layer}, z≤${saved.maxZ})`;
+                `Saved: ${saved.tiles} tiles, ${fmtMB(saved.bytes)} (${what}, z≤${saved.maxZ})`;
         }
         offlineDelete.hidden = !saved;
         offlineDownload.textContent = saved ? 'Re-download' : 'Download';
         offlineProgress.hidden = true;
         offlinePanel.hidden = false;
         updateOfflineEstimate();
+        // Frame the whole download area so the rectangle is fully visible
+        map.fitBounds(bufferedBBox(track), {padding: 60, duration: 600});
     }
 
     function closeOfflinePanel() {
@@ -732,18 +736,18 @@
 
     document.getElementById('offlineClose').addEventListener('click', closeOfflinePanel);
 
-    // Dashed rectangle on the map showing the area that would be downloaded
+    // Shaded rectangle on the map showing the area that would be downloaded
     function setBBoxPreview(bbox) {
         const data = {
             type: 'Feature',
             properties: {},
             geometry: {
-                type: 'LineString',
-                coordinates: bbox ? [
+                type: 'Polygon',
+                coordinates: bbox ? [[
                     [bbox[0], bbox[1]], [bbox[2], bbox[1]],
                     [bbox[2], bbox[3]], [bbox[0], bbox[3]],
                     [bbox[0], bbox[1]]
-                ] : []
+                ]] : []
             }
         };
         const src = map.getSource('offline-bbox');
@@ -751,6 +755,12 @@
             src.setData(data);
         } else {
             map.addSource('offline-bbox', {type: 'geojson', data});
+            map.addLayer({
+                id: 'offline-bbox-fill',
+                type: 'fill',
+                source: 'offline-bbox',
+                paint: {'fill-color': '#01586f', 'fill-opacity': 0.12}
+            });
             map.addLayer({
                 id: 'offline-bbox',
                 type: 'line',
@@ -764,10 +774,10 @@
         const track = tracks.get(offlineTrackId);
         if (!track) return;
         const bbox = bufferedBBox(track);
-        const layer = currentBaseLayer();
         const n = areaTiles(bbox, +maxZoomSel.value).length;
+        const bytes = OFFLINE_LAYERS.reduce((sum, l) => sum + n * AVG_TILE_BYTES[l], 0);
         offlineEstimate.textContent =
-            `${layer}: ${n} tiles, ≈${fmtMB(n * AVG_TILE_BYTES[layer])}`;
+            `${OFFLINE_LAYERS.length} layers × ${n} tiles, ≈${fmtMB(bytes)}`;
         setBBoxPreview(bbox);
     }
 
@@ -784,10 +794,9 @@
         offlineDownload.disabled = true;
         offlineDelete.disabled = true;
 
-        const layer = currentBaseLayer();
         const maxZ = +maxZoomSel.value;
         const bbox = bufferedBBox(track);
-        const queue = tileUrls(layer, bbox, maxZ);
+        const queue = OFFLINE_LAYERS.flatMap((l) => tileUrls(l, bbox, maxZ));
         const total = queue.length;
 
         offlineProgress.hidden = false;
@@ -818,7 +827,7 @@
         }
         await Promise.all(Array.from({length: 6}, worker));
 
-        offlineAreas[track.saveKey] = {bbox, maxZ, layer, tiles: total - failed, bytes};
+        offlineAreas[track.saveKey] = {bbox, maxZ, layers: OFFLINE_LAYERS.slice(), tiles: total - failed, bytes};
         saveOfflineRegistry();
         offlineProgress.hidden = true;
         offlineStatus.textContent = `Saved ${total - failed} tiles, ${fmtMB(bytes)}` +
@@ -838,10 +847,13 @@
         saveOfflineRegistry();
         // Recompute the URL list from the saved parameters and evict each
         // tile. Tiles shared with another downloaded area are lost too —
-        // re-download that area if it matters.
+        // re-download that area if it matters. (`layer` singular covers
+        // areas saved before downloads spanned all layers.)
         const cache = await caches.open(TILE_CACHE);
-        for (const url of tileUrls(area.layer, area.bbox, area.maxZ)) {
-            await cache.delete(url);
+        for (const layer of area.layers ?? [area.layer]) {
+            for (const url of tileUrls(layer, area.bbox, area.maxZ)) {
+                await cache.delete(url);
+            }
         }
     }
 
