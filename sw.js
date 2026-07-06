@@ -1,9 +1,11 @@
 // Service worker for the map viewer PWA.
 // Strategy: network-first for the app shell (so edits show up on refresh),
-// cache-first for the MapLibre CDN files and icons. Map tiles are never
-// cached here — they'd fill the cache quickly and have their own HTTP caching.
+// cache-first for the MapLibre CDN files and icons. Map tiles are served
+// from the offline tile cache when present — tiles only get INTO that
+// cache via the in-app "download area" feature, never here.
 
 const CACHE = 'mapviewer-v1';
+const TILE_CACHE = 'mapviewer-tiles-v1';
 const SHELL = [
     '.',
     'index.html',
@@ -23,7 +25,7 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
     e.waitUntil(
         caches.keys().then((keys) =>
-            Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+            Promise.all(keys.filter((k) => k !== CACHE && k !== TILE_CACHE).map((k) => caches.delete(k)))
         ).then(() => self.clients.claim())
     );
 });
@@ -55,6 +57,14 @@ self.addEventListener('fetch', (e) => {
                 return res;
             }))
         );
+        return;
     }
-    // Everything else (tiles, terrain, fonts) goes straight to the network.
+
+    // Everything else (tiles, terrain, …): serve from the offline tile
+    // cache if the area was downloaded in-app, otherwise the network.
+    e.respondWith(
+        caches.open(TILE_CACHE)
+            .then((c) => c.match(e.request))
+            .then((hit) => hit || fetch(e.request))
+    );
 });

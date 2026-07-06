@@ -98,6 +98,54 @@
             cursor: pointer;
         }
         .track-item .remove:hover { color: #d00; }
+        .track-item .dl {
+            margin-left: auto;
+            flex: none;
+            border: none;
+            background: none;
+            color: #888;
+            font-size: 15px;
+            cursor: pointer;
+        }
+        .track-item .dl:hover { color: #01586f; }
+        .track-item .dl.saved { color: #2a9d3f; }
+
+        .offline-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: 224px;
+            padding: 10px 12px;
+            background: #fff;
+            border-radius: 4px;
+            box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
+            font-size: 13px;
+        }
+        .offline-panel[hidden] { display: none; }
+        .offline-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: bold;
+        }
+        .offline-header .name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .offline-header .close {
+            margin-left: auto;
+            border: none;
+            background: none;
+            color: #888;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .offline-panel label { display: block; }
+        .offline-panel input[type="range"] { width: 100%; }
+        #offlineEstimate { color: #767676; }
+        #offlineProgress { width: 100%; }
+        .offline-actions { display: flex; gap: 8px; }
 
         .profile-panel {
             position: absolute;
@@ -180,6 +228,30 @@
     <button id="loadGpxBtn" class="toolbar-btn">Load GPX</button>
     <input id="gpxInput" type="file" accept=".gpx" multiple hidden>
     <div id="trackList" class="track-list"></div>
+    <div id="offlinePanel" class="offline-panel" hidden>
+        <div class="offline-header">
+            <span id="offlineTitle" class="name"></span>
+            <button id="offlineClose" class="close" title="Close">×</button>
+        </div>
+        <label>Area around track: <b id="bufferVal">1.0 km</b>
+            <input id="bufferSlider" type="range" min="0.5" max="5" step="0.5" value="1">
+        </label>
+        <label>Detail (max zoom):
+            <select id="maxZoomSel">
+                <option value="13">13 — overview</option>
+                <option value="14">14</option>
+                <option value="15" selected>15 — good for hiking</option>
+                <option value="16">16 — high</option>
+            </select>
+        </label>
+        <div id="offlineEstimate"></div>
+        <progress id="offlineProgress" max="1" value="0" hidden></progress>
+        <div id="offlineStatus" hidden></div>
+        <div class="offline-actions">
+            <button id="offlineDownload" class="toolbar-btn">Download</button>
+            <button id="offlineDelete" class="toolbar-btn" hidden>Delete</button>
+        </div>
+    </div>
 </div>
 <div id="profilePanel" class="profile-panel" hidden>
     <div class="profile-header">
@@ -342,6 +414,8 @@
             for (const r of document.querySelectorAll('input[name="baseLayer"]')) {
                 map.setLayoutProperty(r.value, 'visibility', r.checked ? 'visible' : 'none');
             }
+            // The offline download always grabs the active base layer
+            if (offlineTrackId !== null) updateOfflineEstimate();
         });
     }
 
@@ -363,6 +437,29 @@
     const TRACK_COLORS = ['#e6194b', '#4363d8', '#3cb44b', '#f58231', '#911eb4', '#01838f', '#f032e6'];
     const tracks = new Map(); // id -> {name, color, markers}
     let nextTrackId = 0;
+
+    // Loaded tracks are kept in localStorage (as raw GPX text) so they are
+    // still there when the app is reopened — including offline.
+    const savedTracks = JSON.parse(localStorage.getItem('savedTracks') || '[]');
+
+    function persistTracks() {
+        try {
+            localStorage.setItem('savedTracks', JSON.stringify(savedTracks));
+            return true;
+        } catch (e) {
+            return false; // quota exceeded
+        }
+    }
+
+    map.on('load', () => {
+        for (const t of savedTracks) {
+            try {
+                addTrack(t.filename, t.text, {saveKey: t.key, fit: false});
+            } catch (e) {
+                console.warn(`could not restore ${t.filename}:`, e);
+            }
+        }
+    });
 
     const gpxInput = document.getElementById('gpxInput');
     const trackListEl = document.getElementById('trackList');
@@ -416,7 +513,7 @@
         return {lines, waypoints, name};
     }
 
-    function addTrack(filename, text) {
+    function addTrack(filename, text, opts = {}) {
         const {lines, waypoints, name} = parseGpx(text);
         if (!lines.length && !waypoints.length) {
             alert(`${filename}: no tracks, routes or waypoints found`);
@@ -457,31 +554,53 @@
                 .addTo(map)
         );
 
+        const bounds = new maplibregl.LngLatBounds();
+        lines.flat().forEach((c) => bounds.extend(c));
+        waypoints.forEach((w) => bounds.extend(w.coord));
+
+        const saveKey = opts.saveKey ?? `t${Date.now()}-${nextTrackId}`;
         tracks.set(id, {
             name: name || filename,
             color,
             markers,
             hasLine: lines.length > 0,
-            profile: buildProfile(lines)
+            profile: buildProfile(lines),
+            saveKey,
+            bbox: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]
         });
-        renderTrackList();
 
-        const bounds = new maplibregl.LngLatBounds();
-        lines.flat().forEach((c) => bounds.extend(c));
-        waypoints.forEach((w) => bounds.extend(w.coord));
-        map.fitBounds(bounds, {padding: 80, duration: 1000});
+        if (!opts.saveKey) {
+            savedTracks.push({key: saveKey, filename, text});
+            if (!persistTracks()) {
+                savedTracks.pop();
+                persistTracks();
+                alert(`${filename}: too large for browser storage — it won't survive a reload.`);
+            }
+        }
+
+        renderTrackList();
+        if (opts.fit !== false) map.fitBounds(bounds, {padding: 80, duration: 1000});
     }
 
     function removeTrack(id) {
         const track = tracks.get(id);
         if (!track) return;
         if (profileTrackId === id) closeProfile();
+        if (offlineTrackId === id) closeOfflinePanel();
         if (track.hasLine) {
             map.removeLayer(id);
             map.removeSource(id);
         }
         track.markers.forEach((m) => m.remove());
         tracks.delete(id);
+
+        const saved = savedTracks.findIndex((t) => t.key === track.saveKey);
+        if (saved !== -1) {
+            savedTracks.splice(saved, 1);
+            persistTracks();
+        }
+        deleteOfflineArea(track.saveKey); // async cleanup of any downloaded tiles
+
         renderTrackList();
     }
 
@@ -500,16 +619,243 @@
             label.textContent = track.name;
             label.title = track.name;
 
+            const dlBtn = document.createElement('button');
+            dlBtn.className = 'dl' + (offlineAreas[track.saveKey] ? ' saved' : '');
+            dlBtn.textContent = '⇩';
+            dlBtn.title = offlineAreas[track.saveKey]
+                ? 'Offline area saved — manage'
+                : 'Download map area for offline use';
+            dlBtn.addEventListener('click', () => openOfflinePanel(id));
+
             const removeBtn = document.createElement('button');
             removeBtn.className = 'remove';
+            removeBtn.style.marginLeft = '0';
             removeBtn.textContent = '×';
             removeBtn.title = 'Remove track';
             removeBtn.addEventListener('click', () => removeTrack(id));
 
-            item.append(swatch, label, removeBtn);
+            item.append(swatch, label, dlBtn, removeBtn);
             trackListEl.appendChild(item);
         }
     }
+
+    // --- Offline areas: download base-layer tiles around a track ---
+    // Tiles are fetched into a dedicated Cache Storage cache; the service
+    // worker serves tile requests from that cache first, so downloaded
+    // areas keep working with no connection. Which areas exist is tracked
+    // in localStorage, keyed by the track's saveKey.
+    const TILE_CACHE = 'mapviewer-tiles-v1';
+    const OFFLINE_MIN_ZOOM = 3;
+    const AVG_TILE_BYTES = {osm: 20000, satellite: 30000, opentopo: 60000};
+
+    const offlineAreas = JSON.parse(localStorage.getItem('offlineAreas') || '{}');
+    let offlineTrackId = null;
+    let offlineBusy = false;
+
+    const offlinePanel = document.getElementById('offlinePanel');
+    const bufferSlider = document.getElementById('bufferSlider');
+    const maxZoomSel = document.getElementById('maxZoomSel');
+    const offlineEstimate = document.getElementById('offlineEstimate');
+    const offlineProgress = document.getElementById('offlineProgress');
+    const offlineStatus = document.getElementById('offlineStatus');
+    const offlineDownload = document.getElementById('offlineDownload');
+    const offlineDelete = document.getElementById('offlineDelete');
+
+    function saveOfflineRegistry() {
+        localStorage.setItem('offlineAreas', JSON.stringify(offlineAreas));
+    }
+
+    function currentBaseLayer() {
+        return document.querySelector('input[name="baseLayer"]:checked').value;
+    }
+
+    // Slippy-map tile indices for a lon/lat at zoom z
+    function lon2x(lon, z) { return Math.floor((lon + 180) / 360 * 2 ** z); }
+    function lat2y(lat, z) {
+        const r = lat * Math.PI / 180;
+        return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 2 ** z);
+    }
+
+    function bufferedBBox(track) {
+        const km = +bufferSlider.value;
+        const [w, s, e, n] = track.bbox;
+        const dLat = km / 111.32;
+        const dLon = dLat / Math.cos(((s + n) / 2) * Math.PI / 180);
+        return [w - dLon, s - dLat, e + dLon, n + dLat];
+    }
+
+    function areaTiles(bbox, maxZ) {
+        const [w, s, e, n] = bbox;
+        const tiles = [];
+        for (let z = OFFLINE_MIN_ZOOM; z <= maxZ; z++) {
+            const last = 2 ** z - 1;
+            const x0 = Math.max(0, lon2x(w, z)), x1 = Math.min(last, lon2x(e, z));
+            const y0 = Math.max(0, lat2y(n, z)), y1 = Math.min(last, lat2y(s, z));
+            for (let x = x0; x <= x1; x++) {
+                for (let y = y0; y <= y1; y++) tiles.push({z, x, y});
+            }
+        }
+        return tiles;
+    }
+
+    function tileUrls(layer, bbox, maxZ) {
+        const tpl = map.getStyle().sources[layer].tiles[0];
+        return areaTiles(bbox, maxZ).map((t) =>
+            tpl.replace('{z}', t.z).replace('{x}', t.x).replace('{y}', t.y));
+    }
+
+    function fmtMB(bytes) { return `${(bytes / 1048576).toFixed(1)} MB`; }
+
+    function openOfflinePanel(id) {
+        if (offlineBusy) return;
+        offlineTrackId = id;
+        const track = tracks.get(id);
+        document.getElementById('offlineTitle').textContent = track.name;
+        const saved = offlineAreas[track.saveKey];
+        offlineStatus.hidden = !saved;
+        if (saved) {
+            offlineStatus.textContent =
+                `Saved: ${saved.tiles} tiles, ${fmtMB(saved.bytes)} (${saved.layer}, z≤${saved.maxZ})`;
+        }
+        offlineDelete.hidden = !saved;
+        offlineDownload.textContent = saved ? 'Re-download' : 'Download';
+        offlineProgress.hidden = true;
+        offlinePanel.hidden = false;
+        updateOfflineEstimate();
+    }
+
+    function closeOfflinePanel() {
+        offlinePanel.hidden = true;
+        offlineTrackId = null;
+        setBBoxPreview(null);
+    }
+
+    document.getElementById('offlineClose').addEventListener('click', closeOfflinePanel);
+
+    // Dashed rectangle on the map showing the area that would be downloaded
+    function setBBoxPreview(bbox) {
+        const data = {
+            type: 'Feature',
+            properties: {},
+            geometry: {
+                type: 'LineString',
+                coordinates: bbox ? [
+                    [bbox[0], bbox[1]], [bbox[2], bbox[1]],
+                    [bbox[2], bbox[3]], [bbox[0], bbox[3]],
+                    [bbox[0], bbox[1]]
+                ] : []
+            }
+        };
+        const src = map.getSource('offline-bbox');
+        if (src) {
+            src.setData(data);
+        } else {
+            map.addSource('offline-bbox', {type: 'geojson', data});
+            map.addLayer({
+                id: 'offline-bbox',
+                type: 'line',
+                source: 'offline-bbox',
+                paint: {'line-color': '#01586f', 'line-width': 2, 'line-dasharray': [2, 2]}
+            });
+        }
+    }
+
+    function updateOfflineEstimate() {
+        const track = tracks.get(offlineTrackId);
+        if (!track) return;
+        const bbox = bufferedBBox(track);
+        const layer = currentBaseLayer();
+        const n = areaTiles(bbox, +maxZoomSel.value).length;
+        offlineEstimate.textContent =
+            `${layer}: ${n} tiles, ≈${fmtMB(n * AVG_TILE_BYTES[layer])}`;
+        setBBoxPreview(bbox);
+    }
+
+    bufferSlider.addEventListener('input', () => {
+        document.getElementById('bufferVal').textContent = `${(+bufferSlider.value).toFixed(1)} km`;
+        updateOfflineEstimate();
+    });
+    maxZoomSel.addEventListener('change', updateOfflineEstimate);
+
+    offlineDownload.addEventListener('click', async () => {
+        const track = tracks.get(offlineTrackId);
+        if (!track || offlineBusy) return;
+        offlineBusy = true;
+        offlineDownload.disabled = true;
+        offlineDelete.disabled = true;
+
+        const layer = currentBaseLayer();
+        const maxZ = +maxZoomSel.value;
+        const bbox = bufferedBBox(track);
+        const queue = tileUrls(layer, bbox, maxZ);
+        const total = queue.length;
+
+        offlineProgress.hidden = false;
+        offlineProgress.value = 0;
+        offlineStatus.hidden = false;
+
+        const cache = await caches.open(TILE_CACHE);
+        let done = 0, bytes = 0, failed = 0;
+
+        async function worker() {
+            while (queue.length) {
+                const url = queue.pop();
+                try {
+                    const res = await fetch(url);
+                    if (res.ok) {
+                        bytes += (await res.clone().arrayBuffer()).byteLength;
+                        await cache.put(url, res);
+                    } else {
+                        failed++;
+                    }
+                } catch (e) {
+                    failed++;
+                }
+                done++;
+                offlineProgress.value = done / total;
+                offlineStatus.textContent = `Downloading ${done} / ${total} tiles…`;
+            }
+        }
+        await Promise.all(Array.from({length: 6}, worker));
+
+        offlineAreas[track.saveKey] = {bbox, maxZ, layer, tiles: total - failed, bytes};
+        saveOfflineRegistry();
+        offlineProgress.hidden = true;
+        offlineStatus.textContent = `Saved ${total - failed} tiles, ${fmtMB(bytes)}` +
+            (failed ? ` (${failed} failed)` : '');
+        offlineDownload.textContent = 'Re-download';
+        offlineDownload.disabled = false;
+        offlineDelete.hidden = false;
+        offlineDelete.disabled = false;
+        offlineBusy = false;
+        renderTrackList();
+    });
+
+    async function deleteOfflineArea(key) {
+        const area = offlineAreas[key];
+        if (!area) return;
+        delete offlineAreas[key];
+        saveOfflineRegistry();
+        // Recompute the URL list from the saved parameters and evict each
+        // tile. Tiles shared with another downloaded area are lost too —
+        // re-download that area if it matters.
+        const cache = await caches.open(TILE_CACHE);
+        for (const url of tileUrls(area.layer, area.bbox, area.maxZ)) {
+            await cache.delete(url);
+        }
+    }
+
+    offlineDelete.addEventListener('click', async () => {
+        const track = tracks.get(offlineTrackId);
+        if (!track || offlineBusy) return;
+        offlineBusy = true;
+        offlineDelete.disabled = true;
+        await deleteOfflineArea(track.saveKey);
+        offlineDelete.disabled = false;
+        offlineBusy = false;
+        openOfflinePanel(offlineTrackId); // refresh the panel state
+        renderTrackList();
+    });
 
     // --- Elevation profile panel (click a track line to open) ---
     const profilePanel = document.getElementById('profilePanel');
