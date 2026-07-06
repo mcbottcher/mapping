@@ -308,14 +308,29 @@
                     attribution: '&copy; Waymarked Trails (CC-BY-SA)',
                     maxzoom: 18
                 },
-                // Use a different source for terrain and hillshade layers, to improve render quality
+                // Terrain & hillshade elevation tiles (Mapterhorn), inlined
+                // rather than referenced via tilejson.json so the map needs
+                // no index fetch when offline. maxzoom 12 caps which DEM
+                // tiles the map requests (beyond that it upsamples z12,
+                // ~10 m resolution), so offline area downloads can cover
+                // every tile 3D will ever ask for at a reasonable size.
+                // Separate sources for terrain and hillshade improve
+                // render quality.
                 terrainSource: {
                     type: 'raster-dem',
-                    url: 'https://tiles.mapterhorn.com/tilejson.json'
+                    tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'],
+                    encoding: 'terrarium',
+                    tileSize: 512,
+                    maxzoom: 12,
+                    attribution: '<a href="https://mapterhorn.com/attribution">&copy; Mapterhorn</a>'
                 },
                 hillshadeSource: {
                     type: 'raster-dem',
-                    url: 'https://tiles.mapterhorn.com/tilejson.json'
+                    tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'],
+                    encoding: 'terrarium',
+                    tileSize: 512,
+                    maxzoom: 12,
+                    attribution: '<a href="https://mapterhorn.com/attribution">&copy; Mapterhorn</a>'
                 }
             },
             layers: [
@@ -652,6 +667,10 @@
     // switching still works offline.
     const OFFLINE_LAYERS = ['osm', 'satellite', 'opentopo', 'trails'];
     const AVG_TILE_BYTES = {osm: 20000, satellite: 30000, opentopo: 60000, trails: 8000};
+    // Elevation (DEM) tiles for 3D/hillshade, capped to match the
+    // terrainSource maxzoom in the style.
+    const DEM_MAX_ZOOM = 12;
+    const AVG_DEM_TILE_BYTES = 300000;
 
     const offlineAreas = JSON.parse(localStorage.getItem('offlineAreas') || '{}');
     let offlineTrackId = null;
@@ -775,9 +794,11 @@
         if (!track) return;
         const bbox = bufferedBBox(track);
         const n = areaTiles(bbox, +maxZoomSel.value).length;
-        const bytes = OFFLINE_LAYERS.reduce((sum, l) => sum + n * AVG_TILE_BYTES[l], 0);
+        const demN = areaTiles(bbox, DEM_MAX_ZOOM).length;
+        const bytes = OFFLINE_LAYERS.reduce((sum, l) => sum + n * AVG_TILE_BYTES[l], 0) +
+            demN * AVG_DEM_TILE_BYTES;
         offlineEstimate.textContent =
-            `${OFFLINE_LAYERS.length} layers × ${n} tiles, ≈${fmtMB(bytes)}`;
+            `${OFFLINE_LAYERS.length} layers × ${n} + ${demN} terrain tiles, ≈${fmtMB(bytes)}`;
         setBBoxPreview(bbox);
     }
 
@@ -797,6 +818,7 @@
         const maxZ = +maxZoomSel.value;
         const bbox = bufferedBBox(track);
         const queue = OFFLINE_LAYERS.flatMap((l) => tileUrls(l, bbox, maxZ));
+        queue.push(...tileUrls('terrainSource', bbox, DEM_MAX_ZOOM));
         const total = queue.length;
 
         offlineProgress.hidden = false;
@@ -827,7 +849,10 @@
         }
         await Promise.all(Array.from({length: 6}, worker));
 
-        offlineAreas[track.saveKey] = {bbox, maxZ, layers: OFFLINE_LAYERS.slice(), tiles: total - failed, bytes};
+        offlineAreas[track.saveKey] = {
+            bbox, maxZ, layers: OFFLINE_LAYERS.slice(),
+            demMaxZ: DEM_MAX_ZOOM, tiles: total - failed, bytes
+        };
         saveOfflineRegistry();
         offlineProgress.hidden = true;
         offlineStatus.textContent = `Saved ${total - failed} tiles, ${fmtMB(bytes)}` +
@@ -852,6 +877,11 @@
         const cache = await caches.open(TILE_CACHE);
         for (const layer of area.layers ?? [area.layer]) {
             for (const url of tileUrls(layer, area.bbox, area.maxZ)) {
+                await cache.delete(url);
+            }
+        }
+        if (area.demMaxZ) {
+            for (const url of tileUrls('terrainSource', area.bbox, area.demMaxZ)) {
                 await cache.delete(url);
             }
         }
