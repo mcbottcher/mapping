@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Personal Map Viewer</title>
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#01586f">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" type="image/png" href="icons/icon-192.png">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel='stylesheet' href='https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css' />
+    <script src='https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js'></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        html, body, #map { height: 100%; }
+
+        .toolbar {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+            font: 14px/1.4 sans-serif;
+        }
+        .toolbar-btn {
+            padding: 6px 14px;
+            font: bold 14px/1.4 sans-serif;
+            color: #333;
+            background: #fff;
+            border: none;
+            border-radius: 4px;
+            box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
+            cursor: pointer;
+        }
+        .toolbar-btn:hover { background: #f2f2f2; }
+
+        .layers-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding: 8px 12px;
+            background: #fff;
+            border-radius: 4px;
+            box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
+        }
+        .layers-panel[hidden] { display: none; }
+        .layers-panel label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .layers-panel hr {
+            width: 100%;
+            margin: 4px 0;
+            border: none;
+            border-top: 1px solid #ddd;
+        }
+
+        .track-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-width: 260px;
+        }
+        .track-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 8px;
+            background: #fff;
+            border-radius: 4px;
+            box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
+        }
+        .track-item .swatch {
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            flex: none;
+        }
+        .track-item .name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .track-item .remove {
+            margin-left: auto;
+            border: none;
+            background: none;
+            color: #888;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .track-item .remove:hover { color: #d00; }
+
+        .profile-panel {
+            position: absolute;
+            right: 10px;
+            bottom: 28px;
+            z-index: 2;
+            width: 400px;
+            max-width: calc(100vw - 20px);
+            padding: 10px 12px 12px;
+            background: #fff;
+            border-radius: 6px;
+            box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+            font: 13px/1.4 sans-serif;
+            color: #333;
+        }
+        .profile-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .profile-header .swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            flex: none;
+        }
+        .profile-title {
+            font-weight: bold;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .profile-close {
+            margin-left: auto;
+            border: none;
+            background: none;
+            color: #888;
+            font-size: 18px;
+            cursor: pointer;
+        }
+        .profile-close:hover { color: #d00; }
+        .profile-stats {
+            display: flex;
+            gap: 16px;
+            margin: 4px 0 8px;
+            color: #767676;
+        }
+        .profile-stats b { color: #333; }
+        .profile-chart-wrap { position: relative; }
+        #profileCanvas {
+            display: block;
+            width: 100%;
+            height: 170px;
+        }
+        .profile-tooltip {
+            position: absolute;
+            pointer-events: none;
+            padding: 2px 7px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+            white-space: nowrap;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="toolbar">
+    <button id="viewToggle" class="toolbar-btn">2D</button>
+    <button id="layersBtn" class="toolbar-btn">Layers</button>
+    <div id="layersPanel" class="layers-panel" hidden>
+        <label><input type="radio" name="baseLayer" value="osm"> Street (OSM)</label>
+        <label><input type="radio" name="baseLayer" value="satellite" checked> Satellite</label>
+        <label><input type="radio" name="baseLayer" value="opentopo"> Topo</label>
+        <hr>
+        <label><input type="checkbox" class="overlay-toggle" value="hills"> Hillshade</label>
+        <label><input type="checkbox" class="overlay-toggle" value="trails"> Hiking trails</label>
+    </div>
+    <button id="loadGpxBtn" class="toolbar-btn">Load GPX</button>
+    <input id="gpxInput" type="file" accept=".gpx" multiple hidden>
+    <div id="trackList" class="track-list"></div>
+</div>
+<div id="profilePanel" class="profile-panel" hidden>
+    <div class="profile-header">
+        <span id="profileSwatch" class="swatch"></span>
+        <span id="profileTitle" class="profile-title"></span>
+        <button id="profileClose" class="profile-close" title="Close">×</button>
+    </div>
+    <div id="profileStats" class="profile-stats"></div>
+    <div class="profile-chart-wrap">
+        <canvas id="profileCanvas"></canvas>
+        <div id="profileTooltip" class="profile-tooltip" hidden></div>
+    </div>
+</div>
+<script>
+    const PITCH_3D = 65;
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        zoom: 12.32,
+        center: [-5.02907, 56.79816],
+        bearing: 48.9,
+        pitch: PITCH_3D,
+        hash: true,
+        style: {
+            version: 8,
+            sources: {
+                osm: {
+                    type: 'raster',
+                    tiles: ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                    tileSize: 256,
+                    attribution: '&copy; OpenStreetMap Contributors',
+                    maxzoom: 19
+                },
+                satellite: {
+                    type: 'raster',
+                    tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+                    tileSize: 256,
+                    attribution: '&copy; Esri, Maxar, Earthstar Geographics',
+                    maxzoom: 19
+                },
+                opentopo: {
+                    type: 'raster',
+                    tiles: ['https://a.tile.opentopomap.org/{z}/{x}/{y}.png'],
+                    tileSize: 256,
+                    attribution: '&copy; OpenStreetMap Contributors, SRTM | Map style &copy; OpenTopoMap (CC-BY-SA)',
+                    maxzoom: 17
+                },
+                trails: {
+                    type: 'raster',
+                    tiles: ['https://tile.waymarkedtrails.org/hiking/{z}/{x}/{y}.png'],
+                    tileSize: 256,
+                    attribution: '&copy; Waymarked Trails (CC-BY-SA)',
+                    maxzoom: 18
+                },
+                // Use a different source for terrain and hillshade layers, to improve render quality
+                terrainSource: {
+                    type: 'raster-dem',
+                    url: 'https://tiles.mapterhorn.com/tilejson.json'
+                },
+                hillshadeSource: {
+                    type: 'raster-dem',
+                    url: 'https://tiles.mapterhorn.com/tilejson.json'
+                }
+            },
+            layers: [
+                // Base layers: exactly one visible at a time (layer switcher)
+                {
+                    id: 'osm',
+                    type: 'raster',
+                    source: 'osm',
+                    layout: {visibility: 'none'}
+                },
+                {
+                    id: 'satellite',
+                    type: 'raster',
+                    source: 'satellite',
+                    layout: {visibility: 'visible'}
+                },
+                {
+                    id: 'opentopo',
+                    type: 'raster',
+                    source: 'opentopo',
+                    layout: {visibility: 'none'}
+                },
+                // Overlays
+                {
+                    id: 'hills',
+                    type: 'hillshade',
+                    source: 'hillshadeSource',
+                    layout: {visibility: 'none'},
+                    paint: {'hillshade-shadow-color': '#473B24'}
+                },
+                {
+                    id: 'trails',
+                    type: 'raster',
+                    source: 'trails',
+                    layout: {visibility: 'none'}
+                }
+            ],
+            terrain: {
+                source: 'terrainSource',
+                exaggeration: 1
+            },
+            sky: {}
+        },
+        maxZoom: 18,
+        maxPitch: 85
+    });
+
+    map.addControl(
+        new maplibregl.NavigationControl({
+            visualizePitch: true,
+            showZoom: true,
+            showCompass: true
+        })
+    );
+
+    map.addControl(
+        new maplibregl.TerrainControl({
+            source: 'terrainSource',
+            exaggeration: 1
+        })
+    );
+
+    map.addControl(
+        new maplibregl.GeolocateControl({
+            positionOptions: {enableHighAccuracy: true},
+            trackUserLocation: true
+        })
+    );
+
+    map.addControl(new maplibregl.ScaleControl());
+
+    // Toggle between flat 2D view and tilted 3D view.
+    // Terrain elevation stays on either way; the mountain-icon
+    // TerrainControl above turns the elevation itself on/off.
+    const viewToggle = document.getElementById('viewToggle');
+
+    function updateToggleLabel() {
+        viewToggle.textContent = map.getPitch() > 0 ? '2D' : '3D';
+    }
+
+    viewToggle.addEventListener('click', () => {
+        const goingTo3D = map.getPitch() === 0;
+        map.easeTo({pitch: goingTo3D ? PITCH_3D : 0, duration: 800});
+    });
+
+    map.on('pitchend', updateToggleLabel);
+    updateToggleLabel();
+
+    // --- Layer switcher ---
+    const layersPanel = document.getElementById('layersPanel');
+
+    document.getElementById('layersBtn').addEventListener('click', () => {
+        layersPanel.hidden = !layersPanel.hidden;
+    });
+
+    for (const radio of document.querySelectorAll('input[name="baseLayer"]')) {
+        radio.addEventListener('change', () => {
+            for (const r of document.querySelectorAll('input[name="baseLayer"]')) {
+                map.setLayoutProperty(r.value, 'visibility', r.checked ? 'visible' : 'none');
+            }
+        });
+    }
+
+    for (const checkbox of document.querySelectorAll('.overlay-toggle')) {
+        checkbox.addEventListener('change', () => {
+            map.setLayoutProperty(checkbox.value, 'visibility', checkbox.checked ? 'visible' : 'none');
+        });
+    }
+
+    // Browsers can restore form state across reloads; sync the map to the
+    // controls once the style is ready so they never disagree.
+    map.on('load', () => {
+        for (const input of document.querySelectorAll('input[name="baseLayer"], .overlay-toggle')) {
+            map.setLayoutProperty(input.value, 'visibility', input.checked ? 'visible' : 'none');
+        }
+    });
+
+    // --- GPX track loading (button or drag-and-drop onto the map) ---
+    const TRACK_COLORS = ['#e6194b', '#4363d8', '#3cb44b', '#f58231', '#911eb4', '#01838f', '#f032e6'];
+    const tracks = new Map(); // id -> {name, color, markers}
+    let nextTrackId = 0;
+
+    const gpxInput = document.getElementById('gpxInput');
+    const trackListEl = document.getElementById('trackList');
+
+    document.getElementById('loadGpxBtn').addEventListener('click', () => gpxInput.click());
+    gpxInput.addEventListener('change', () => {
+        loadGpxFiles(gpxInput.files);
+        gpxInput.value = '';
+    });
+
+    const mapEl = document.getElementById('map');
+    mapEl.addEventListener('dragover', (e) => e.preventDefault());
+    mapEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        loadGpxFiles(e.dataTransfer.files);
+    });
+
+    function loadGpxFiles(fileList) {
+        for (const file of fileList) {
+            if (!/\.gpx$/i.test(file.name)) continue;
+            file.text()
+                .then((text) => addTrack(file.name, text))
+                .catch((err) => alert(`${file.name}: ${err.message}`));
+        }
+    }
+
+    function parseGpx(text) {
+        const doc = new DOMParser().parseFromString(text, 'application/xml');
+        if (doc.querySelector('parsererror')) {
+            throw new Error('not a valid GPX file');
+        }
+        // Track segments and routes both become lines
+        const lines = [];
+        for (const seg of doc.querySelectorAll('trkseg, rte')) {
+            const ptTag = seg.localName === 'rte' ? 'rtept' : 'trkpt';
+            const coords = [...seg.querySelectorAll(ptTag)].map((p) => {
+                const ele = p.querySelector('ele');
+                return [
+                    +p.getAttribute('lon'),
+                    +p.getAttribute('lat'),
+                    ele ? +ele.textContent : null
+                ];
+            });
+            if (coords.length > 1) lines.push(coords);
+        }
+        const waypoints = [...doc.querySelectorAll('wpt')].map((w) => ({
+            coord: [+w.getAttribute('lon'), +w.getAttribute('lat')],
+            name: w.querySelector('name')?.textContent ?? ''
+        }));
+        const name = doc.querySelector('trk > name, metadata > name')?.textContent;
+        return {lines, waypoints, name};
+    }
+
+    function addTrack(filename, text) {
+        const {lines, waypoints, name} = parseGpx(text);
+        if (!lines.length && !waypoints.length) {
+            alert(`${filename}: no tracks, routes or waypoints found`);
+            return;
+        }
+
+        const id = `gpx-track-${nextTrackId++}`;
+        const color = TRACK_COLORS[tracks.size % TRACK_COLORS.length];
+
+        if (lines.length) {
+            map.addSource(id, {
+                type: 'geojson',
+                data: {
+                    type: 'Feature',
+                    properties: {},
+                    geometry: {
+                        type: 'MultiLineString',
+                        coordinates: lines.map((line) => line.map((c) => [c[0], c[1]]))
+                    }
+                }
+            });
+            map.addLayer({
+                id,
+                type: 'line',
+                source: id,
+                layout: {'line-cap': 'round', 'line-join': 'round'},
+                paint: {'line-color': color, 'line-width': 4, 'line-opacity': 0.85}
+            });
+            map.on('click', id, (e) => showProfile(id, e.lngLat));
+            map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
+            map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
+        }
+
+        const markers = waypoints.map((w) =>
+            new maplibregl.Marker({color, scale: 0.8})
+                .setLngLat(w.coord)
+                .setPopup(new maplibregl.Popup({offset: 30}).setText(w.name))
+                .addTo(map)
+        );
+
+        tracks.set(id, {
+            name: name || filename,
+            color,
+            markers,
+            hasLine: lines.length > 0,
+            profile: buildProfile(lines)
+        });
+        renderTrackList();
+
+        const bounds = new maplibregl.LngLatBounds();
+        lines.flat().forEach((c) => bounds.extend(c));
+        waypoints.forEach((w) => bounds.extend(w.coord));
+        map.fitBounds(bounds, {padding: 80, duration: 1000});
+    }
+
+    function removeTrack(id) {
+        const track = tracks.get(id);
+        if (!track) return;
+        if (profileTrackId === id) closeProfile();
+        if (track.hasLine) {
+            map.removeLayer(id);
+            map.removeSource(id);
+        }
+        track.markers.forEach((m) => m.remove());
+        tracks.delete(id);
+        renderTrackList();
+    }
+
+    function renderTrackList() {
+        trackListEl.innerHTML = '';
+        for (const [id, track] of tracks) {
+            const item = document.createElement('div');
+            item.className = 'track-item';
+
+            const swatch = document.createElement('span');
+            swatch.className = 'swatch';
+            swatch.style.background = track.color;
+
+            const label = document.createElement('span');
+            label.className = 'name';
+            label.textContent = track.name;
+            label.title = track.name;
+
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'remove';
+            removeBtn.textContent = '×';
+            removeBtn.title = 'Remove track';
+            removeBtn.addEventListener('click', () => removeTrack(id));
+
+            item.append(swatch, label, removeBtn);
+            trackListEl.appendChild(item);
+        }
+    }
+
+    // --- Elevation profile panel (click a track line to open) ---
+    const profilePanel = document.getElementById('profilePanel');
+    const profileCanvas = document.getElementById('profileCanvas');
+    const profileTooltip = document.getElementById('profileTooltip');
+
+    let profileTrackId = null;
+    let profilePoints = [];   // [{dist, ele, coord}] with valid elevations
+    let profileColor = '#000';
+    let profilePlot = null;   // plot-area geometry of the last draw, for hover mapping
+    let routeDot = null;      // draggable dot on the map, snapped to the route
+    let currentIdx = -1;      // profile point the dot (and chart crosshair) sit on
+
+    function haversineMeters(a, b) {
+        const R = 6371000;
+        const toRad = Math.PI / 180;
+        const dLat = (b[1] - a[1]) * toRad;
+        const dLon = (b[0] - a[0]) * toRad;
+        const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(a[1] * toRad) * Math.cos(b[1] * toRad) * Math.sin(dLon / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(h));
+    }
+
+    function buildProfile(lines) {
+        const points = [];
+        let dist = 0;
+        for (const line of lines) {
+            for (let i = 0; i < line.length; i++) {
+                if (i > 0) dist += haversineMeters(line[i - 1], line[i]);
+                points.push({dist, ele: line[i][2], coord: [line[i][0], line[i][1]]});
+            }
+        }
+        return points;
+    }
+
+    function showProfile(id, clickLngLat) {
+        const track = tracks.get(id);
+        if (!track) return;
+        profileTrackId = id;
+        profileColor = track.color;
+
+        // Prefer elevation from the GPX itself; fall back to the loaded
+        // terrain tiles for files without <ele> (best effort — may be null
+        // for areas whose DEM tiles aren't loaded).
+        let points = track.profile.map((p) => {
+            if (p.ele !== null && !Number.isNaN(p.ele)) return p;
+            let ele = null;
+            try { ele = map.queryTerrainElevation(p.coord); } catch (e) { /* no terrain */ }
+            return {...p, ele};
+        }).filter((p) => p.ele !== null && !Number.isNaN(p.ele));
+
+        // Downsample long tracks so hover redraws stay cheap
+        if (points.length > 1200) {
+            const step = Math.ceil(points.length / 1000);
+            points = points.filter((_, i) => i % step === 0 || i === points.length - 1);
+        }
+        profilePoints = points;
+
+        document.getElementById('profileSwatch').style.background = track.color;
+        const title = document.getElementById('profileTitle');
+        title.textContent = track.name;
+        title.title = track.name;
+
+        document.getElementById('profileStats').innerHTML =
+            points.length >= 2 ? profileStatsHtml(points) : distanceStatHtml(track.profile);
+        document.querySelector('.profile-chart-wrap').hidden = points.length < 2;
+        profilePanel.hidden = false;
+        if (points.length >= 2) {
+            setCurrentIdx(clickLngLat ? nearestPointIndex(clickLngLat) : 0);
+        } else {
+            currentIdx = -1;
+            if (routeDot) routeDot.remove();
+            drawProfile();
+        }
+    }
+
+    function closeProfile() {
+        profilePanel.hidden = true;
+        profileTrackId = null;
+        profileTooltip.hidden = true;
+        currentIdx = -1;
+        if (routeDot) routeDot.remove();
+    }
+
+    document.getElementById('profileClose').addEventListener('click', closeProfile);
+
+    function profileStatsHtml(points) {
+        const km = (points[points.length - 1].dist / 1000).toFixed(1);
+        // Light smoothing before summing climbs, so GPS noise doesn't inflate ascent
+        const smoothed = points.map((p, i) => {
+            const w = points.slice(Math.max(0, i - 2), i + 3);
+            return w.reduce((s, q) => s + q.ele, 0) / w.length;
+        });
+        let ascent = 0;
+        for (let i = 1; i < smoothed.length; i++) {
+            ascent += Math.max(0, smoothed[i] - smoothed[i - 1]);
+        }
+        const maxEle = Math.round(Math.max(...points.map((p) => p.ele)));
+        return `<span>Distance <b>${km} km</b></span>` +
+            `<span>Ascent <b>≈${Math.round(ascent)} m</b></span>` +
+            `<span>Max <b>${maxEle} m</b></span>`;
+    }
+
+    function ensureRouteDot() {
+        if (routeDot) return routeDot;
+        const el = document.createElement('div');
+        el.style.cssText =
+            'width:14px;height:14px;border-radius:50%;border:2px solid #fff;' +
+            'box-shadow:0 0 3px rgba(0,0,0,.5);cursor:grab;';
+        routeDot = new maplibregl.Marker({element: el, draggable: true});
+        routeDot.on('drag', () => {
+            if (!profilePoints.length) return;
+            setCurrentIdx(nearestPointIndex(routeDot.getLngLat()), true);
+        });
+        return routeDot;
+    }
+
+    function nearestPointIndex(lngLat) {
+        // Squared equirectangular distance is fine for finding the nearest vertex
+        const cosLat = Math.cos(lngLat.lat * Math.PI / 180);
+        let best = 0;
+        let bestD = Infinity;
+        for (let i = 0; i < profilePoints.length; i++) {
+            const dx = (profilePoints[i].coord[0] - lngLat.lng) * cosLat;
+            const dy = profilePoints[i].coord[1] - lngLat.lat;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    // Move the dot + chart crosshair to a profile point; the single source
+    // of truth used by map clicks, dot drags and chart hovers alike.
+    function setCurrentIdx(idx, showTooltip = false) {
+        currentIdx = idx;
+        const p = profilePoints[idx];
+        const dot = ensureRouteDot();
+        dot.getElement().style.background = profileColor;
+        dot.setLngLat(p.coord).addTo(map);
+        drawProfile(idx);
+        if (showTooltip) showTooltipAt(p);
+        else profileTooltip.hidden = true;
+    }
+
+    function showTooltipAt(p) {
+        if (!profilePlot) return;
+        profileTooltip.textContent =
+            `${(p.dist / 1000).toFixed(2)} km · ${Math.round(p.ele)} m`;
+        profileTooltip.hidden = false;
+        const rect = profileCanvas.getBoundingClientRect();
+        const ttW = profileTooltip.offsetWidth;
+        profileTooltip.style.left =
+            `${Math.min(rect.width - ttW, Math.max(0, profilePlot.x(p.dist) - ttW / 2))}px`;
+        profileTooltip.style.top = `${Math.max(0, profilePlot.y(p.ele) - 28)}px`;
+    }
+
+    function distanceStatHtml(points) {
+        if (!points.length) return '';
+        const km = (points[points.length - 1].dist / 1000).toFixed(1);
+        return `<span>Distance <b>${km} km</b></span>`;
+    }
+
+    function niceStep(range, targetTicks) {
+        const raw = range / targetTicks;
+        const pow = 10 ** Math.floor(Math.log10(raw));
+        for (const m of [1, 2, 2.5, 5, 10]) {
+            if (raw <= m * pow) return m * pow;
+        }
+        return 10 * pow;
+    }
+
+    function drawProfile(hoverIdx = currentIdx) {
+        const points = profilePoints;
+        const rect = profileCanvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        profileCanvas.width = rect.width * dpr;
+        profileCanvas.height = rect.height * dpr;
+        const ctx = profileCanvas.getContext('2d');
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        if (points.length < 2) { profilePlot = null; return; }
+
+        const margin = {left: 42, right: 8, top: 10, bottom: 20};
+        const plotW = rect.width - margin.left - margin.right;
+        const plotH = rect.height - margin.top - margin.bottom;
+
+        const totalDist = points[points.length - 1].dist;
+        const eles = points.map((p) => p.ele);
+        let yStep = niceStep(Math.max(10, Math.max(...eles) - Math.min(...eles)), 4);
+        const yMin = Math.floor(Math.min(...eles) / yStep) * yStep;
+        const yMax = Math.ceil((Math.max(...eles) + 1) / yStep) * yStep;
+
+        const x = (dist) => margin.left + (dist / totalDist) * plotW;
+        const y = (ele) => margin.top + (1 - (ele - yMin) / (yMax - yMin)) * plotH;
+
+        ctx.font = '11px sans-serif';
+
+        // Horizontal gridlines + elevation labels
+        for (let v = yMin; v <= yMax; v += yStep) {
+            ctx.strokeStyle = '#ececec';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(margin.left, y(v));
+            ctx.lineTo(margin.left + plotW, y(v));
+            ctx.stroke();
+            ctx.fillStyle = '#767676';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(`${v} m`, margin.left - 6, y(v));
+        }
+
+        // Distance labels along the bottom (km)
+        const xStepKm = niceStep(totalDist / 1000, 5);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        for (let km = 0; km * 1000 <= totalDist; km += xStepKm) {
+            ctx.fillText(`${km} km`, x(km * 1000), margin.top + plotH + 5);
+        }
+
+        // Area fill under the line
+        ctx.beginPath();
+        ctx.moveTo(x(points[0].dist), y(points[0].ele));
+        for (const p of points) ctx.lineTo(x(p.dist), y(p.ele));
+        ctx.lineTo(x(totalDist), margin.top + plotH);
+        ctx.lineTo(x(points[0].dist), margin.top + plotH);
+        ctx.closePath();
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = profileColor;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // Elevation line
+        ctx.beginPath();
+        ctx.moveTo(x(points[0].dist), y(points[0].ele));
+        for (const p of points) ctx.lineTo(x(p.dist), y(p.ele));
+        ctx.strokeStyle = profileColor;
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        // Hover crosshair + dot
+        if (hoverIdx >= 0) {
+            const p = points[hoverIdx];
+            ctx.strokeStyle = '#bbb';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x(p.dist), margin.top);
+            ctx.lineTo(x(p.dist), margin.top + plotH);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(x(p.dist), y(p.ele), 4, 0, Math.PI * 2);
+            ctx.fillStyle = profileColor;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        profilePlot = {margin, plotW, plotH, totalDist, x, y};
+    }
+
+    profileCanvas.addEventListener('pointermove', (e) => {
+        if (!profilePlot || !profilePoints.length) return;
+        const {margin, plotW, totalDist} = profilePlot;
+        const frac = Math.min(1, Math.max(0, (e.offsetX - margin.left) / plotW));
+        const dist = frac * totalDist;
+
+        // Nearest point by distance (points are sorted)
+        let lo = 0, hi = profilePoints.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (profilePoints[mid].dist < dist) lo = mid + 1; else hi = mid;
+        }
+        if (lo > 0 && dist - profilePoints[lo - 1].dist < profilePoints[lo].dist - dist) lo--;
+
+        setCurrentIdx(lo, true);
+    });
+
+    profileCanvas.addEventListener('pointerleave', () => {
+        profileTooltip.hidden = true;
+    });
+
+    window.addEventListener('resize', () => {
+        if (!profilePanel.hidden) drawProfile();
+    });
+
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js');
+    }
+</script>
+</body>
+</html>
