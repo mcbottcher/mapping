@@ -112,6 +112,47 @@
         .track-item .dl:hover { color: #01586f; }
         .track-item .dl.saved { color: #2a9d3f; }
 
+        .saved-panel { width: 240px; }
+        #savedList {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .saved-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .saved-row .swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            flex: none;
+        }
+        .saved-row .name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            cursor: pointer;
+        }
+        .saved-row .name:hover { text-decoration: underline; }
+        .saved-row .size {
+            margin-left: auto;
+            flex: none;
+            color: #999;
+            font-size: 11px;
+        }
+        .saved-row .remove {
+            flex: none;
+            border: none;
+            background: none;
+            color: #888;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .saved-row .remove:hover { color: #d00; }
+        .saved-empty { color: #767676; }
+
         .offline-panel {
             display: flex;
             flex-direction: column;
@@ -228,6 +269,14 @@
         <label><input type="checkbox" class="overlay-toggle" value="trails"> Hiking trails</label>
     </div>
     <button id="loadGpxBtn" class="toolbar-btn">Load GPX</button>
+    <button id="savedBtn" class="toolbar-btn">Saved routes</button>
+    <div id="savedPanel" class="offline-panel saved-panel" hidden>
+        <div class="offline-header">
+            <span class="name">Saved routes</span>
+            <button id="savedClose" class="close" title="Close">×</button>
+        </div>
+        <div id="savedList"></div>
+    </div>
     <input id="gpxInput" type="file" accept=".gpx" multiple hidden>
     <div id="trackList" class="track-list"></div>
     <div id="offlinePanel" class="offline-panel" hidden>
@@ -468,12 +517,14 @@
 
     map.on('load', () => {
         for (const t of savedTracks) {
+            if (t.hidden) continue; // closed by the user — reopen via Saved routes
             try {
                 addTrack(t.filename, t.text, {saveKey: t.key, fit: false});
             } catch (e) {
                 console.warn(`could not restore ${t.filename}:`, e);
             }
         }
+        renderSavedList();
     });
 
     const gpxInput = document.getElementById('gpxInput');
@@ -597,7 +648,9 @@
         if (opts.fit !== false) map.fitBounds(bounds, {padding: 80, duration: 1000});
     }
 
-    function removeTrack(id) {
+    // Take the track off the map, but keep the saved GPX and any downloaded
+    // tiles — reopen or actually delete it from the Saved routes panel.
+    function closeTrack(id) {
         const track = tracks.get(id);
         if (!track) return;
         if (profileTrackId === id) closeProfile();
@@ -609,12 +662,11 @@
         track.markers.forEach((m) => m.remove());
         tracks.delete(id);
 
-        const saved = savedTracks.findIndex((t) => t.key === track.saveKey);
-        if (saved !== -1) {
-            savedTracks.splice(saved, 1);
+        const saved = savedTracks.find((t) => t.key === track.saveKey);
+        if (saved) {
+            saved.hidden = true;
             persistTracks();
         }
-        deleteOfflineArea(track.saveKey); // async cleanup of any downloaded tiles
 
         renderTrackList();
     }
@@ -648,12 +700,103 @@
             removeBtn.className = 'remove';
             removeBtn.style.marginLeft = '0';
             removeBtn.textContent = '×';
-            removeBtn.title = 'Remove track';
-            removeBtn.addEventListener('click', () => removeTrack(id));
+            removeBtn.title = 'Close track (stays in Saved routes)';
+            removeBtn.addEventListener('click', () => closeTrack(id));
 
             item.append(swatch, label, dlBtn, removeBtn);
             trackListEl.appendChild(item);
         }
+        renderSavedList();
+    }
+
+    // --- Saved routes manager ---
+    // Every loaded GPX stays here (open or closed) until deleted, which is
+    // the only action that removes the GPX and its downloaded tiles — and
+    // it asks first, so a stray tap can't wipe a map mid-hike.
+    const savedPanel = document.getElementById('savedPanel');
+    const savedListEl = document.getElementById('savedList');
+
+    document.getElementById('savedBtn').addEventListener('click', () => {
+        savedPanel.hidden = !savedPanel.hidden;
+        if (!savedPanel.hidden) renderSavedList();
+    });
+    document.getElementById('savedClose').addEventListener('click', () => {
+        savedPanel.hidden = true;
+    });
+
+    function trackIdForKey(key) {
+        for (const [id, t] of tracks) {
+            if (t.saveKey === key) return id;
+        }
+        return null;
+    }
+
+    function renderSavedList() {
+        savedListEl.innerHTML = '';
+        if (!savedTracks.length) {
+            const empty = document.createElement('div');
+            empty.className = 'saved-empty';
+            empty.textContent = 'Nothing saved yet — load a GPX file.';
+            savedListEl.appendChild(empty);
+            return;
+        }
+        for (const t of savedTracks) {
+            const openId = trackIdForKey(t.key);
+            const row = document.createElement('div');
+            row.className = 'saved-row';
+
+            const swatch = document.createElement('span');
+            swatch.className = 'swatch';
+            swatch.style.background = openId ? tracks.get(openId).color : '#ccc';
+            swatch.title = openId ? 'Shown on map' : 'Closed';
+
+            const label = document.createElement('span');
+            label.className = 'name';
+            label.textContent = t.filename;
+            label.title = openId
+                ? `${t.filename} — click to zoom to it`
+                : `${t.filename} — click to show it on the map`;
+            label.addEventListener('click', () => {
+                const id = trackIdForKey(t.key);
+                if (id) {
+                    map.fitBounds(tracks.get(id).bbox, {padding: 80, duration: 1000});
+                } else {
+                    delete t.hidden;
+                    persistTracks();
+                    addTrack(t.filename, t.text, {saveKey: t.key});
+                }
+            });
+
+            const size = document.createElement('span');
+            size.className = 'size';
+            const area = offlineAreas[t.key];
+            size.textContent = area ? fmtMB(area.bytes) : '';
+            size.title = area ? 'Downloaded map size' : '';
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'remove';
+            delBtn.textContent = '🗑';
+            delBtn.title = 'Delete route and its downloaded maps';
+            delBtn.addEventListener('click', () => deleteSavedTrack(t.key));
+
+            row.append(swatch, label, size, delBtn);
+            savedListEl.appendChild(row);
+        }
+    }
+
+    async function deleteSavedTrack(key) {
+        const t = savedTracks.find((s) => s.key === key);
+        if (!t) return;
+        const area = offlineAreas[key];
+        const extra = area ? ` and its downloaded maps (${fmtMB(area.bytes)})` : '';
+        if (!confirm(`Delete "${t.filename}"${extra}? This cannot be undone.`)) return;
+
+        const openId = trackIdForKey(key);
+        if (openId) closeTrack(openId);
+        savedTracks.splice(savedTracks.indexOf(t), 1);
+        persistTracks();
+        await deleteOfflineArea(key);
+        renderSavedList();
     }
 
     // --- Offline areas: download base-layer tiles around a track ---
