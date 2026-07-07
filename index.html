@@ -813,6 +813,13 @@
     let offlineTrackId = null;
     let offlineBusy = false;
 
+    // Saved = downloaded. Prune routes stored without a downloaded area —
+    // an older version of the app auto-saved every loaded GPX.
+    for (let i = savedTracks.length - 1; i >= 0; i--) {
+        if (!offlineAreas[savedTracks[i].key]) savedTracks.splice(i, 1);
+    }
+    persistTracks();
+
     const offlinePanel = document.getElementById('offlinePanel');
     const bufferSlider = document.getElementById('bufferSlider');
     const maxZoomSel = document.getElementById('maxZoomSel');
