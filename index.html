@@ -502,8 +502,9 @@
     const tracks = new Map(); // id -> {name, color, markers}
     let nextTrackId = 0;
 
-    // Loaded tracks are kept in localStorage (as raw GPX text) so they are
-    // still there when the app is reopened — including offline.
+    // Routes the user downloaded a map area for are kept in localStorage
+    // (as raw GPX text) so they are still there when the app is reopened —
+    // including offline. Merely loaded GPX files live only for the session.
     const savedTracks = JSON.parse(localStorage.getItem('savedTracks') || '[]');
 
     function persistTracks() {
@@ -627,6 +628,8 @@
         const saveKey = opts.saveKey ?? `t${Date.now()}-${nextTrackId}`;
         tracks.set(id, {
             name: name || filename,
+            filename,
+            text,
             color,
             markers,
             hasLine: lines.length > 0,
@@ -634,15 +637,6 @@
             saveKey,
             bbox: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]
         });
-
-        if (!opts.saveKey) {
-            savedTracks.push({key: saveKey, filename, text});
-            if (!persistTracks()) {
-                savedTracks.pop();
-                persistTracks();
-                alert(`${filename}: too large for browser storage — it won't survive a reload.`);
-            }
-        }
 
         renderTrackList();
         if (opts.fit !== false) map.fitBounds(bounds, {padding: 80, duration: 1000});
@@ -736,7 +730,7 @@
         if (!savedTracks.length) {
             const empty = document.createElement('div');
             empty.className = 'saved-empty';
-            empty.textContent = 'Nothing saved yet — load a GPX file.';
+            empty.textContent = 'Nothing saved yet — download a map area for a route (⇩).';
             savedListEl.appendChild(empty);
             return;
         }
@@ -997,6 +991,7 @@
             demMaxZ: DEM_MAX_ZOOM, tiles: total - failed, bytes
         };
         saveOfflineRegistry();
+        ensureTrackSaved(offlineTrackId);
         offlineProgress.hidden = true;
         offlineStatus.textContent = `Saved ${total - failed} tiles, ${fmtMB(bytes)}` +
             (failed ? ` (${failed} failed)` : '');
@@ -1007,6 +1002,20 @@
         offlineBusy = false;
         renderTrackList();
     });
+
+    // Downloading is what saves a route: keep its GPX in localStorage so
+    // the track is still there (offline) when the app is reopened.
+    function ensureTrackSaved(id) {
+        const track = tracks.get(id);
+        if (!track || savedTracks.some((t) => t.key === track.saveKey)) return;
+        savedTracks.push({key: track.saveKey, filename: track.filename, text: track.text});
+        if (!persistTracks()) {
+            savedTracks.pop();
+            persistTracks();
+            alert(`${track.filename}: too large for browser storage — ` +
+                'the map tiles are downloaded, but the route itself won\'t survive a reload.');
+        }
+    }
 
     async function deleteOfflineArea(key) {
         const area = offlineAreas[key];
@@ -1033,9 +1042,19 @@
     offlineDelete.addEventListener('click', async () => {
         const track = tracks.get(offlineTrackId);
         if (!track || offlineBusy) return;
+        const area = offlineAreas[track.saveKey];
+        if (!confirm(`Delete the downloaded maps for "${track.name}"` +
+            `${area ? ` (${fmtMB(area.bytes)})` : ''}? ` +
+            'The route also leaves Saved routes.')) return;
         offlineBusy = true;
         offlineDelete.disabled = true;
         await deleteOfflineArea(track.saveKey);
+        // No download → no longer saved; the track stays on the map for now.
+        const saved = savedTracks.findIndex((t) => t.key === track.saveKey);
+        if (saved !== -1) {
+            savedTracks.splice(saved, 1);
+            persistTracks();
+        }
         offlineDelete.disabled = false;
         offlineBusy = false;
         openOfflinePanel(offlineTrackId); // refresh the panel state
